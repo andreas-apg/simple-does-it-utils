@@ -280,7 +280,7 @@ def box_method(image_path, seg_path, save_path, image_name):
         return image, seg_image, image_copy#, dense
     else:
         #print(f"Empty image: {image_name}")
-        return image, image*0, image*0, image*0
+        return image, image*0, image*0
             
 def crf_method(image_path, seg_image, image_name):
     image, bb, w, h = open_yolo_sort(image_path, image_name)
