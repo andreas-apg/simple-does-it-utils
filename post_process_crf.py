@@ -15,6 +15,10 @@ from PIL import Image
 import functools
 from multiprocessing import Pool
 
+import traceback
+import sys
+import warnings
+
 #from tqdm.contrib.concurrent import process_map
 
 def bb_midpoint_to_corner(bb):
@@ -36,7 +40,9 @@ def open_yolo_sort(path, image_name):
         height = shape[0]
         #print(width, height)
         label = path + os.path.splitext(image_name)[0] + ".txt"
-        boxes = np.genfromtxt(label, delimiter=' ')
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            boxes = np.genfromtxt(label, delimiter=' ')
         bb = boxes
         # reshaping the np array is necessary in case a file with a single box is read
         boxes = boxes.reshape(boxes.size//5, 5)
@@ -155,7 +161,7 @@ def encode_target(mask):
     return label_mask
 
 # https://www.programcreek.com/python/?code=1044197988%2FSemantic-segmentation-of-remote-sensing-images%2FSemantic-segmentation-of-remote-sensing-images-master%2FCRF.py
-def crf(original_image, annotated_image):
+def crf(original_image, annotated_image, inference):
     """Applies the denseCRF (Conditional Random Fields) algorithm.
     Args:
         original_image (np.ndarray) : the original image of dimension (M, N, 3).
@@ -171,50 +177,52 @@ def crf(original_image, annotated_image):
     og_colors, labels = np.unique(annotated_label, return_inverse=True)
 #     print(og_colors)
     n_labels = len(set(labels.flat))
-    
-    # Setting up the CRF model
-    #if use_2d :
-    d = dcrf.DenseCRF2D(original_image.shape[1], original_image.shape[0], n_labels)
+    if (n_labels > 1):
+        # Setting up the CRF model
+        #if use_2d :
+        d = dcrf.DenseCRF2D(original_image.shape[1], original_image.shape[0], n_labels)
 
-    # get unary potentials (neg log probability)
-    U = unary_from_labels(labels, n_labels, gt_prob=0.7, zero_unsure=False)
-    d.setUnaryEnergy(U)
+        # get unary potentials (neg log probability)
+        U = unary_from_labels(labels, n_labels, gt_prob=0.7, zero_unsure=False)
+        d.setUnaryEnergy(U)
 
-    # This adds the color-independent term, features are the locations only.
-    d.addPairwiseGaussian(sxy=(3, 3), compat=3, kernel=dcrf.DIAG_KERNEL,
-                      normalization=dcrf.NORMALIZE_SYMMETRIC)
+        # This adds the color-independent term, features are the locations only.
+        d.addPairwiseGaussian(sxy=(3, 3), compat=3, kernel=dcrf.DIAG_KERNEL,
+                          normalization=dcrf.NORMALIZE_SYMMETRIC)
 
-    # This adds the color-dependent term, i.e. features are (x,y,r,g,b).
-    d.addPairwiseBilateral(sxy=(80, 80), srgb=(13, 13, 13), rgbim=original_image,
-                       compat=10,
-                       kernel=dcrf.DIAG_KERNEL,
-                       normalization=dcrf.NORMALIZE_SYMMETRIC)
-    # end of if  
-    #Run Inference for 5 steps 
-    Q = d.inference(10)
+        # This adds the color-dependent term, i.e. features are (x,y,r,g,b).
+        d.addPairwiseBilateral(sxy=(80, 80), srgb=(13, 13, 13), rgbim=original_image,
+                           compat=10,
+                           kernel=dcrf.DIAG_KERNEL,
+                           normalization=dcrf.NORMALIZE_SYMMETRIC)
+        # end of if  
+        #Run Inference for 5 steps 
+        Q = d.inference(inference)
 
-    # Find out the most probable class for each pixel.
-    MAP = np.argmax(Q, axis=0)
-    colors, labels = np.unique(MAP, return_inverse=True)
-    #print(len(colors))
-#     print(colors)
-    # C Convert the map (label) back to the corresponding color and save the image.
-    # Note that there is no more "unknown" here, no matter what we had in the first place.
-    # A: reshaping the MAP into the dimensions of the image
-    MAP = MAP.reshape(original_image.shape[0], original_image.shape[1])
-    MAP_copy = MAP.copy()
-    # A: this, essentially, is an encoder for the encoder. og_colors has the indexes that go
-    # with the decoder. However, the argmax doesn't keep that value, instead replacing it with
-    # 0... number of unique colors. But the order is retained, so by mapping the index of each
-    # unique color with the og_colors one, it's possible to go back to the correct indexes that
-    # will then decode into the associated BGR mask color.
-    for l in range(0, len(og_colors)):
-        MAP_copy[MAP == l] = og_colors[l]
-    colors, labels = np.unique(MAP_copy, return_inverse=True)
-#     print(colors)
-    MAP_copy = decode_target(MAP_copy)
+        # Find out the most probable class for each pixel.
+        MAP = np.argmax(Q, axis=0)
+        colors, labels = np.unique(MAP, return_inverse=True)
+        #print(len(colors))
+    #     print(colors)
+        # C Convert the map (label) back to the corresponding color and save the image.
+        # Note that there is no more "unknown" here, no matter what we had in the first place.
+        # A: reshaping the MAP into the dimensions of the image
+        MAP = MAP.reshape(original_image.shape[0], original_image.shape[1])
+        MAP_copy = MAP.copy()
+        # A: this, essentially, is an encoder for the encoder. og_colors has the indexes that go
+        # with the decoder. However, the argmax doesn't keep that value, instead replacing it with
+        # 0... number of unique colors. But the order is retained, so by mapping the index of each
+        # unique color with the og_colors one, it's possible to go back to the correct indexes that
+        # will then decode into the associated BGR mask color.
+        for l in range(0, len(og_colors)):
+            MAP_copy[MAP == l] = og_colors[l]
+        colors, labels = np.unique(MAP_copy, return_inverse=True)
+    #     print(colors)
+        MAP_copy = decode_target(MAP_copy)
 
-    return MAP_copy
+        return MAP_copy
+    else:
+        return annotated_image
     
 def box_method(image_path, seg_path, save_path, image_name):
     #print(image_name)
@@ -257,8 +265,25 @@ def box_method(image_path, seg_path, save_path, image_name):
             # area is set to that label color, if the pixel count of that label is smaller
             # than 50% of the area.
             # Most classes will use 50% of the IoU.
-            if label > 6 or label == 5:
-                if(count < int(area/3)):
+            # problem classes: [2, 4, 6] (needs to be smaller) (chaves fechadas, fusivel)
+            #                  [12]  (needs to not shrink too much) (transformador)
+            # A: for classes that it's known that the object will be much smaller than the original
+            # bounding box, 1/2 of the area is too much. 1/3 will be used to allow the model to
+            # shrink those objects towards something.
+            if label in [2, 4, 6]:
+                if(count < int(area * 0.25)):
+                    image_copy[sy1:sy2, sx1:sx2] = colors[label]
+                else:
+                    image_copy[sy1:sy2, sx1:sx2][np.where(np.all(seg_image[sy1:sy2, sx1:sx2] == colors[label], axis=-1))[:2]] = colors[label]
+            # A: for classes that it's known the bounding box actually was pretty close to the object itself
+            elif label == 12:
+                if(count < int(area * 0.8)):
+                    image_copy[sy1:sy2, sx1:sx2] = colors[label]
+                else:
+                    image_copy[sy1:sy2, sx1:sx2][np.where(np.all(seg_image[sy1:sy2, sx1:sx2] == colors[label], axis=-1))[:2]] = colors[label]
+            # Most classes will use 50% of the IoU.
+            else:
+                if(count < int(area * 0.5)):
                     image_copy[sy1:sy2, sx1:sx2] = colors[label]
                 # A: By default, any pixel not within a bounding box is black.
                 # To make 1. happen, we'll work within the constraints of the original bounding
@@ -267,20 +292,12 @@ def box_method(image_path, seg_path, save_path, image_name):
                 # coordinates that share the correct label color will be set to that color.
                 # Do not forget that images are y, x.
                 else:
-                    image_copy[sy1:sy2, sx1:sx2][np.where(np.all(seg_image[sy1:sy2, sx1:sx2] == colors[label], axis=-1))[:2]] = colors[label]  
-            # A: for classes that it's known that the object will be much smaller than the original
-            # bounding box, 1/2 of the area is too much. 1/3 will be used to allow the model to
-            # shrink those objects towards something.
-            else:
-                if(count < int(area/4)):
-                    image_copy[sy1:sy2, sx1:sx2] = colors[label]
-                else:
                     image_copy[sy1:sy2, sx1:sx2][np.where(np.all(seg_image[sy1:sy2, sx1:sx2] == colors[label], axis=-1))[:2]] = colors[label] 
           
         return image, seg_image, image_copy#, dense
     else:
         #print(f"Empty image: {image_name}")
-        return image, image*0, image*0
+        return image, image*0, image*0#, image*0
             
 def crf_method(image_path, seg_image, image_name):
     image, bb, w, h = open_yolo_sort(image_path, image_name)
@@ -288,7 +305,7 @@ def crf_method(image_path, seg_image, image_name):
     dense_copy = seg_image.copy()*0 
     presentation = 0
     if bb is not None:  
-        dense = crf(image, seg_image)        
+        dense = crf(image, seg_image, 5)        
         for label, x1, x2, y1, y2, area in bb:
             sx1 = int(x1*w)
             sx2 = int(x2*w)
@@ -308,28 +325,35 @@ def crf_method(image_path, seg_image, image_name):
             # A: if the list is empty, it's because the background was the only color
             # present.
             if count > 0:
-                # A: sorting the color list by number of occurrences. This will be then recolored
-                # to the supposedly correct label, if appliable. 
-                #print(f"Correct label: {class_names[label]} ({label})")
-                # A: we'll make an exception for the classes that are known to ALWAYS have two things within
-                # the bounding boxes: fuses and switches always have isolators, which will probably
-                # have a bigger area (1~4 and 6).
-                if label > 6 or label == 5:
-                    # A: reapplying the second condition - the IoU - to the image. This is already excluding the
-                    # known problematic classes - the fuses and switches will always be much, much smaller than their
-                    # depicted boxes, and as such they need to be compared with less than half the area
-                    if(count < int(area/3)):
-                        #print("IoU too small. Replacing.")
+                # A: reapplying the second condition - the IoU - to the image. This is already excluding the
+                # known problematic classes - the fuses and switches will always be much, much smaller than their
+                # depicted boxes, and as such they need to be compared with less than half the area.
+                # Meanwhile, transformers are usually closer to their bounding boxes.
+                
+                # for classes that it's known they're pretty small
+                # chaves fechadas, fusivel
+                if label in [2, 4, 6]:
+                    if(count < int(area * 0.25)):
+                        #print("IoU < 0.25 for problematic class. Replacing.")
                         dense_copy[sy1:sy2, sx1:sx2][np.where(np.all(seg_image[sy1:sy2, sx1:sx2] == colors[label], axis=-1))[:2]] = colors[label]
                     else:
                         dense_copy[sy1:sy2, sx1:sx2][np.where(np.all(crf_slice_area == colors[label], axis=-1))[:2]] = colors[label]
+                # A: for classes that it's known the bounding box actually was pretty close to the object itself
+                # transformador
+                elif label == 12:
+                    if(count < int(area * 0.8)):
+                        #print("IoU < 0.80 problematic class. Replacing.")
+                        dense_copy[sy1:sy2, sx1:sx2][np.where(np.all(seg_image[sy1:sy2, sx1:sx2] == colors[label], axis=-1))[:2]] = colors[label]
+                    else:
+                        dense_copy[sy1:sy2, sx1:sx2][np.where(np.all(crf_slice_area == colors[label], axis=-1))[:2]] = colors[label]
+                
                 else:
-                    if(count < int(area/4)):
-                        #print("IoU too small for problematic class. Replacing.")
+                    # the remaining classes will keep at the 50% threshold for IoU
+                    if(count < int(area * 0.5)):
+                        #print("IoU < 0.50. Replacing.")
                         dense_copy[sy1:sy2, sx1:sx2][np.where(np.all(seg_image[sy1:sy2, sx1:sx2] == colors[label], axis=-1))[:2]] = colors[label]
                     else:
                         dense_copy[sy1:sy2, sx1:sx2][np.where(np.all(crf_slice_area == colors[label], axis=-1))[:2]] = colors[label]
-                   
                     
             # A: assuming background was the only color, the CRF removed it, so we'll just copy whatever is
             # in the corrected mask, instead of the crf.
@@ -344,14 +368,26 @@ def crf_method(image_path, seg_image, image_name):
         return image*0
 
 def post_process(image_path, seg_path, save_path, image_name):
-    image, seg_image, cut_image = box_method(image_path, seg_path, save_path, image_name)
-    crf_image = crf_method(image_path, cut_image, image_name)
-    kernel = np.ones((10,10),np.uint8)
-    #crf_image = cv2.morphologyEx(crf_image, cv2.MORPH_CLOSE, kernel, iterations=1)
-    #crf_image = cv2.morphologyEx(crf_image, cv2.MORPH_OPEN, kernel, iterations=1)
-    #crf_image = cv2.dilate(crf_image, kernel, iterations=1)
-    cv2.imwrite(save_path + os.path.splitext(image_name)[0] +".png", cv2.cvtColor(crf_image, cv2.COLOR_BGR2RGB))
-    return True
+    try:
+        image, seg_image, cut_image = box_method(image_path, seg_path, save_path, image_name)
+        colors, labels = np.unique(cut_image, return_inverse=True)
+        n_labels = len(set(labels.flat))
+        if (n_labels > 1):
+            crf_image = crf_method(image_path, cut_image, image_name)
+            #kernel = np.ones((10,10),np.uint8)
+            #crf_image = cv2.morphologyEx(crf_image, cv2.MORPH_CLOSE, kernel, iterations=1)
+            #crf_image = cv2.morphologyEx(crf_image, cv2.MORPH_OPEN, kernel, iterations=1)
+            #crf_image = cv2.dilate(crf_image, kernel, iterations=1)
+            cv2.imwrite(save_path + os.path.splitext(image_name)[0] +".png", cv2.cvtColor(crf_image, cv2.COLOR_BGR2RGB))
+            return True
+        else:
+            cv2.imwrite(save_path + os.path.splitext(image_name)[0] +".png", cv2.cvtColor(cut_image, cv2.COLOR_BGR2RGB))
+            return False
+    except Exception as e:
+        cv2.imwrite(save_path + os.path.splitext(image_name)[0] +".png", cv2.cvtColor(cut_image, cv2.COLOR_BGR2RGB))
+        print(image_name)
+        print(e)
+        return False
     
 def main():
     parser = argparse.ArgumentParser()
