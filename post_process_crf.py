@@ -20,6 +20,8 @@ import sys
 import warnings
 
 #from tqdm.contrib.concurrent import process_map
+#from p_tqdm import p_map
+#import time
 
 def bb_midpoint_to_corner(bb):
     label = bb[0]
@@ -372,6 +374,7 @@ def post_process(image_path, seg_path, save_path, image_name):
         image, seg_image, cut_image = box_method(image_path, seg_path, save_path, image_name)
         colors, labels = np.unique(cut_image, return_inverse=True)
         n_labels = len(set(labels.flat))
+        print(image_name)
         if (n_labels > 1):
             crf_image = crf_method(image_path, cut_image, image_name)
             #kernel = np.ones((10,10),np.uint8)
@@ -379,15 +382,15 @@ def post_process(image_path, seg_path, save_path, image_name):
             #crf_image = cv2.morphologyEx(crf_image, cv2.MORPH_OPEN, kernel, iterations=1)
             #crf_image = cv2.dilate(crf_image, kernel, iterations=1)
             cv2.imwrite(save_path + os.path.splitext(image_name)[0] +".png", cv2.cvtColor(crf_image, cv2.COLOR_BGR2RGB))
-            return True
+            #return True
         else:
             cv2.imwrite(save_path + os.path.splitext(image_name)[0] +".png", cv2.cvtColor(cut_image, cv2.COLOR_BGR2RGB))
-            return False
+            #return False
     except Exception as e:
         cv2.imwrite(save_path + os.path.splitext(image_name)[0] +".png", cv2.cvtColor(cut_image, cv2.COLOR_BGR2RGB))
         print(image_name)
         print(e)
-        return False
+        #return False
     
 def main():
     parser = argparse.ArgumentParser()
@@ -413,12 +416,16 @@ def main():
     # making a partial function, since the only variable argument will be the image_name
     part_post_process = functools.partial(post_process, opt.image_path, opt.seg_path, opt.save_path)
     
-    pool = Pool()
+    pool = Pool(5)
 
-    for r in tqdm(pool.imap_unordered(part_post_process, image_list), total=len(image_list)):
-        pass
+    #for r in tqdm(pool.imap_unordered(part_post_process, image_list), total=len(image_list)):
+    #    pass
+    pool.map(part_post_process, image_list)
+    pool.close()
+    
+    #r = p_map(part_post_process, image_list)
     # the image_list is made into an iterator
-    #r = process_map(part_post_process, iter(image_list[0:10]))
+    #r = process_map(part_post_process, iter(image_list))
     #for image_name in tqdm(image_list[0:10], total=len(image_list[0:10])):
     #    part_post_process(image_name)
     print(f"Processed {len(image_list)} images. Saved images to {opt.save_path}")
